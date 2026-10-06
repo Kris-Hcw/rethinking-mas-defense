@@ -36,6 +36,7 @@ from src.api import AsyncLLMClient
 from src.data import load_local
 from src.mas import DebateMAS, DefenseConfig, AttackConfig
 from src.topology import build_adjacency, adjacency_to_list
+from src.message_classifier import classify_messages, extract_message_samples, format_report, write_report, write_separability_report
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,8 @@ def parse_args():
                    help="vLLM or OpenAI API base URL. Pass empty string for OpenAI default.")
     p.add_argument("--api_key",   default=os.environ.get("OPENAI_API_KEY", "EMPTY"))
     p.add_argument("--model",     default="llama3-8b")
+    p.add_argument("--disable_thinking", action="store_true",
+                   help="Disable Qwen-style thinking when supported by the API.")
     p.add_argument("--max_concurrency", type=int, default=64)
     p.add_argument("--timeout",         type=float, default=300.0)
 
@@ -95,6 +98,18 @@ def parse_args():
     p.add_argument("--out_file", default=None,
                    help="Output JSONL path. Auto-generated from config if omitted.")
     p.add_argument("--eval_concurrency", type=int, default=32)
+
+    # Optional post-generation message classification
+    p.add_argument("--classify_messages", action="store_true",
+                   help="Classify generated messages as benign or malicious after the LLM run.")
+    p.add_argument("--embedding_model", default="sentence-transformers/all-MiniLM-L6-v2",
+                   help="Sentence-Transformers model used for message embeddings.")
+    p.add_argument("--classification_test_size", type=float, default=0.2,
+                   help="Question-group fraction held out for message classification.")
+    p.add_argument("--classification_output", default=None,
+                   help="JSON path for classification metrics and test predictions.")
+    p.add_argument("--separability_output", default=None,
+                   help="Standalone Markdown path for separability data only.")
 
     return p.parse_args()
 
@@ -144,6 +159,7 @@ async def main():
         api_key=args.api_key,
         max_concurrency=args.max_concurrency,
         timeout=args.timeout,
+        disable_thinking=args.disable_thinking,
     )
     defense = DefenseConfig(
         mode=args.defense,
@@ -171,6 +187,7 @@ async def main():
     write_lock = asyncio.Lock()
     total = correct = 0
     t0 = time.time()
+    classification_samples = []
 
     async def process_one(step: int, rec: dict) -> None:
         nonlocal total, correct
@@ -228,6 +245,8 @@ async def main():
             }
             with open(out_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            if args.classify_messages:
+                classification_samples.extend(extract_message_samples(row))
 
     tasks = [asyncio.create_task(process_one(i + 1, rec))
              for i, rec in enumerate(records)]
@@ -235,6 +254,28 @@ async def main():
 
     acc = correct / total if total else 0.0
     print(f"\nDONE  total={total}  acc={acc:.4f}  output={out_path}")
+
+    if args.classify_messages:
+        report = classify_messages(
+            classification_samples,
+            model_name=args.embedding_model,
+            test_size=args.classification_test_size,
+            seed=args.seed,
+        )
+        classification_path = args.classification_output or (out_path + ".classification.json")
+        write_report(report, classification_path)
+        separability_path = args.separability_output or (out_path + ".separability.md")
+        write_separability_report(report, separability_path, context={
+            "llm_model": args.model,
+            "dataset": args.dataset,
+            "attack": args.attack,
+            "questions": len(records),
+            "n_agents": args.n_agents,
+            "n_rounds": args.n_rounds,
+            "test_size": args.classification_test_size,
+        })
+        print(format_report(report))
+        print(f"classification report -> {classification_path}")
 
 
 if __name__ == "__main__":

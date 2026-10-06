@@ -42,11 +42,13 @@ class AsyncLLMClient:
         max_concurrency: int = 64,
         timeout: float = 300.0,
         max_retries: int = 2,
+        disable_thinking: bool = False,
     ):
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._sem = asyncio.Semaphore(max_concurrency)
         self._timeout = timeout
         self._max_retries = max_retries
+        self._disable_thinking = disable_thinking
 
     async def chat(
         self,
@@ -58,19 +60,24 @@ class AsyncLLMClient:
         top_logprobs: int = 20,
     ) -> ChatOut:
         """Single chat completion. Returns text + per-token logprob info."""
+        # DashScope Qwen-compatible endpoints accept at most five alternatives.
+        top_logprobs = max(0, min(int(top_logprobs), 5))
         last_err: Optional[Exception] = None
         for attempt in range(self._max_retries + 1):
             try:
                 async with self._sem:
-                    resp = await asyncio.wait_for(
-                        self.client.chat.completions.create(
+                    request_kwargs = dict(
                             model=model,
                             messages=messages,
                             temperature=temperature,
                             max_tokens=max_tokens,
                             logprobs=logprobs,
                             top_logprobs=top_logprobs if logprobs else None,
-                        ),
+                    )
+                    if self._disable_thinking:
+                        request_kwargs["extra_body"] = {"enable_thinking": False}
+                    resp = await asyncio.wait_for(
+                        self.client.chat.completions.create(**request_kwargs),
                         timeout=self._timeout,
                     )
                 ch = resp.choices[0]
