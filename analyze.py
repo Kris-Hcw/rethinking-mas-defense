@@ -3,13 +3,13 @@ Result analysis — compute accuracy and confidence statistics from JSONL logs.
 
 Usage:
   # Single file
-  python analyze.py results/mmlu_llama3-8b_slow_drift_pruning_sparse_random.jsonl
+  python analyze.py results/mmlu_llama3-8b_slow_drift_confidence_pruning_sparse_random.jsonl
 
   # Compare multiple files (summary table)
   python analyze.py results/*.jsonl --summary
 
   # Interactive per-sample viewer
-  python analyze.py results/mmlu_llama3-8b_slow_drift_pruning_sparse_random.jsonl --view
+  python analyze.py results/mmlu_llama3-8b_slow_drift_confidence_pruning_sparse_random.jsonl --view
 """
 
 import argparse
@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -43,13 +44,13 @@ def _c(color: str, text: str) -> str:
 def load_jsonl(path: str) -> List[dict]:
     rows = []
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        for line_number, line in enumerate(f, 1):
             line = line.strip()
             if line:
                 try:
                     rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid JSON at {path}:{line_number}; repair the log before reporting accuracy.") from exc
     return rows
 
 
@@ -59,6 +60,7 @@ def load_jsonl(path: str) -> List[dict]:
 
 def compute_accuracy(rows: List[dict]) -> Dict[str, Any]:
     total = correct = 0
+    missing_pred = invalid_attack = 0
     attack_success = 0   # fraction of examples where pred == target_wrong
 
     for r in rows:
@@ -66,25 +68,81 @@ def compute_accuracy(rows: List[dict]) -> Dict[str, Any]:
         pred = r.get("pred")
         target = r.get("target_wrong")
 
-        if gold is None or pred is None:
+        if gold is None:
+            continue
+        if r.get("attack_valid") is False and r.get("attack_type", "none") != "none":
+            invalid_attack += 1
             continue
         total += 1
+        if pred is None:
+            missing_pred += 1
+            continue
         if pred == gold:
             correct += 1
         if target and pred == target:
             attack_success += 1
+
+    b_m = []
+    b_b_same = []
+    b_b_diff = []
+    confidences = []
+    for row in rows:
+        for round_result in row.get("round_results", []):
+            for name, target_list in (
+                ("attacker_benign_cosine_distance", b_m),
+                ("benign_benign_same_cosine_distance", b_b_same),
+                ("benign_benign_diff_cosine_distance", b_b_diff),
+            ):
+                value = round_result.get(name)
+                if value is not None:
+                    target_list.append(float(value))
+            confidences.extend(
+                float(agent["confidence"])
+                for agent in round_result.get("agents", [])
+                if agent.get("confidence") is not None
+            )
+
+    def _mean(values):
+        return sum(values) / len(values) if values else None
 
     return {
         "total":    total,
         "correct":  correct,
         "accuracy": correct / total if total else 0.0,
         "asr":      attack_success / total if total else 0.0,
+        "missing_predictions": missing_pred,
+        "invalid_attacks": invalid_attack,
+        "logged_rows": len(rows),
+        "b_m":      _mean(b_m),
+        "b_b_same": _mean(b_b_same),
+        "b_b_diff": _mean(b_b_diff),
+        "confidence": _mean(confidences),
     }
 
 
 # ---------------------------------------------------------------------------
 # Summary table across multiple files
 # ---------------------------------------------------------------------------
+
+def run_status(path: str, rows: List[dict]) -> str:
+    """Check the standard evaluator sidecar without inventing missing provenance."""
+    sidecar = Path(path).with_suffix(".summary.json")
+    if not sidecar.is_file():
+        return "unverified (no summary)"
+    summary = json.loads(sidecar.read_text(encoding="utf-8"))
+    if not isinstance(summary.get("config_hash"), str) or not summary["config_hash"]:
+        return "unverified (missing summary identity)"
+    if any(row.get("config_hash") != summary.get("config_hash") for row in rows):
+        return "unverified (summary identity mismatch)"
+    if summary.get("total") != len(rows):
+        return "unverified (summary row-count mismatch)"
+    invalid_attacks = any(row.get("attack_valid") is False and row.get("attack_type", "none") != "none"
+                          for row in rows)
+    if invalid_attacks:
+        return "INCOMPLETE (invalid attack rows)"
+    if summary.get("complete") is not True or summary.get("requested_samples") != len(rows) or summary.get("failed_samples") != 0:
+        return f"INCOMPLETE {len(rows)}/{summary.get('requested_samples', '?')}"
+    return f"complete {len(rows)}/{summary.get('requested_samples', '?')}"
 
 def _short_name(path: str) -> str:
     return os.path.splitext(os.path.basename(path))[0]
@@ -111,6 +169,8 @@ def print_summary(paths: List[str]) -> None:
             f"{stats['asr']:.3f}",
             tag,
         ))
+        print(f"  {run_status(path, rows)}; missing predictions={stats['missing_predictions']}; "
+              f"invalid attacks excluded={stats['invalid_attacks']}")
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +242,9 @@ def view_log(path: str) -> None:
 
                 resp  = interaction.get("response", "")
                 reason, answer = _parse(resp)
-                conf_val = confs[ag_idx] if confs and ag_idx < len(confs) else None
+                conf_val = interaction.get("confidence")
+                if conf_val is None:
+                    conf_val = confs[ag_idx] if confs and ag_idx < len(confs) else None
                 conf_str = f"{conf_val:.3f}" if isinstance(conf_val, float) else "n/a"
 
                 print(_c(role_col, f"    Agent {ag_idx} [{role_lbl}]") +
@@ -226,10 +288,17 @@ def main():
 
     print(f"File:     {args.files[0]}")
     print(f"Samples:  {stats['total']}")
+    print(f"Run:      {run_status(args.files[0], rows)}")
+    print(f"Missing predictions (counted wrong): {stats['missing_predictions']}")
+    print(f"Invalid attacks (excluded, condition incomplete): {stats['invalid_attacks']}")
     print(f"Attack:   {attack}")
     print(f"Defense:  {defense}")
     print(f"Accuracy: {stats['accuracy']:.4f}  ({stats['correct']}/{stats['total']})")
     print(f"ASR:      {stats['asr']:.4f}  (fraction pred == target_wrong)")
+    print(f"B-M:      {stats['b_m'] if stats['b_m'] is not None else 'n/a'}")
+    print(f"B-B same: {stats['b_b_same'] if stats['b_b_same'] is not None else 'n/a'}")
+    print(f"B-B diff: {stats['b_b_diff'] if stats['b_b_diff'] is not None else 'n/a'}")
+    print(f"Mean conf:{stats['confidence'] if stats['confidence'] is not None else 'n/a'}")
 
 
 if __name__ == "__main__":

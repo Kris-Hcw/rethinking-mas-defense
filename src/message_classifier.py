@@ -54,7 +54,7 @@ def extract_message_samples(row: Dict[str, Any]) -> List[MessageSample]:
                     group_id=group_id,
                     step=row.get("step"),
                     agent_id=agent_id,
-                    round_id=round_id + 1,
+                    round_id=int(interaction.get("round", round_id + 1)),
                     attack_type=attack_type,
                 )
             )
@@ -158,7 +158,7 @@ def classify_messages(
     except ImportError as exc:
         raise RuntimeError(
             "Message classification requires sentence-transformers and scikit-learn. "
-            "Install requirements-classification.txt."
+            "Install requirements.txt."
         ) from exc
 
     encoder = SentenceTransformer(model_name)

@@ -1,5 +1,7 @@
 # When Embedding-Based Defenses Fail: Rethinking Safety in LLM-Based Multi-Agent Systems
 
+本目录已在 2026-10-09 移植用户验证过的主代码执行链。使用前请读 [修复说明](REPAIR_NOTES.md)，其中包含新结果目录、百炼启动方式和验证范围。历史 `datasets/`、`results/` 保留原样；历史准确率不能代表修复后的实现。
+
 ICML 2026 · Lingxi Zhang, Guangtao Zheng, Hanjie Chen
 
 > We show that embedding-based MAS defenses are vulnerable to near-benign attacks that reduce
@@ -55,8 +57,9 @@ data/bbh_test.jsonl
 ```
 
 > **Note on prompts and reproducibility.**
-> `src/attacks.py` provides simplified reference templates for the benign agent
-> and attacker prompts. 
+> This checkout now uses the user's main attack prompts, candidate search and
+> feasibility checks. The original public repository used simplified templates;
+> matching paper numbers also requires matching model, data and backend protocol.
 
 ---
 

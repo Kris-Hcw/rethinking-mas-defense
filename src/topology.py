@@ -6,7 +6,7 @@ Equivalently, j's message is visible to i at the next round.
 
 Supported topologies:
   "star"         — one center (agent 0) connected to all leaves bidirectionally
-  "chain"        — directed ring: 0→1→2→…→(N-1)→0
+  "chain"        — directed chain: 0→1→2→…→(N-1)
   "sparse_random"— each directed edge (j→i), j≠i, included with probability p
   "full"         — all-to-all (fully connected)
 """
@@ -45,10 +45,9 @@ def build_adjacency(
             adj[0, leaf] = 1    # leaf receives from center
 
     elif topology == "chain":
-        # Directed chain: 0→1→2→…→(N-1)→0 (ring)
-        for i in range(n_agents):
-            nxt = (i + 1) % n_agents
-            adj[i, nxt] = 1     # agent nxt receives from agent i
+        # Directed chain from the paper; there is deliberately no N-1 → 0 edge.
+        for i in range(n_agents - 1):
+            adj[i, i + 1] = 1   # agent i+1 receives from agent i
 
     elif topology == "sparse_random":
         rng = np.random.default_rng(seed)
